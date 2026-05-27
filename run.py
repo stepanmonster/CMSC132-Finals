@@ -277,10 +277,24 @@ class Program:
 
 
 if __name__ == "__main__":
+    import os
     import sys
-    filename = sys.argv[1] if len(sys.argv) > 1 else "program.isa"
-    with open(filename, 'r') as f:
-        lines = f.readlines()
-    program = Program(lines)
-    divzero = Except("Division by zero")
-    program.run()
+
+    REQUIRED_EXT = ".stepanmonster"
+
+    def run_from_file(filename):
+        if os.path.splitext(filename)[1].lower() != REQUIRED_EXT:
+            raise ValueError(f"Input file must use the '{REQUIRED_EXT}' extension.")
+
+        with open(filename, 'r') as f:
+            instructions = f.readlines()
+
+        # Required runtime exception variable for division-by-zero handling.
+        divzero = Except("Division by zero")
+
+        program = Program(instructions)
+        program.run()
+        return divzero
+
+    filename = sys.argv[1] if len(sys.argv) > 1 else f"program{REQUIRED_EXT}"
+    run_from_file(filename)
