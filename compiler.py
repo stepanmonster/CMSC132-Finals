@@ -88,7 +88,7 @@ class Instruction:
         t = token.strip()
         ut = t.upper()
         if ut in variable.data:
-            return int(variable.data[ut])
+            return int(variable.load(ut))
         if Instruction._is_number(t):
             return int(float(t))
         raise ValueError(f"Unknown operand/address token: {token}")
@@ -203,7 +203,7 @@ class Instruction:
                     rem = "0"
 
                 if rem in variable.data:
-                    addr = Instruction._to_addr7(variable.data[rem])
+                    addr = Instruction._to_addr7(variable.load(rem))
                 elif Instruction._is_number(rem):
                     addr = Instruction._to_disp7(int(float(rem)))
                 else:
@@ -346,19 +346,16 @@ class Instruction:
         sequence to simplify block jumps, while preserving the rest in order.
         """
         start_addr = register.load(variable.data["BR"])
-        current_addr = start_addr
 
-        encoded = []
-        block_count = 0
+        # First pass: count actual instructions (skip comments) to determine
+        # where we'll place literal data slots for immediates.
         in_multiline_comment = False
-
+        instr_lines = []
         for raw in program:
             line = raw.rstrip("\n")
             stripped = line.strip()
-
             if not stripped:
                 continue
-
             first = stripped[0].lower()
             if first == "z":
                 in_multiline_comment = not in_multiline_comment
@@ -367,7 +364,20 @@ class Instruction:
                 continue
             if first == "x":
                 continue
+            instr_lines.append(stripped)
 
+        code_count = len(instr_lines)
+
+        # Prepare to allocate literal slots (for immediates) starting after code.
+        data_slots = []  # list of (name, addr, hpbin)
+        data_index = 0
+
+        encoded = []
+        block_count = 0
+
+        # Second pass: build encoded instructions, allocating literal memory
+        # slots for immediates and rewriting operands to refer to literal names.
+        for stripped in instr_lines:
             code_part, maybe_msg = Instruction._extract_msg(stripped)
             if maybe_msg:
                 Instruction._queue_message(maybe_msg)
@@ -376,26 +386,45 @@ class Instruction:
             if not op:
                 continue
 
+            # rewrite operands that are immediate numbers into references to
+            # allocated literal names stored in memory after the code block.
+            new_operands = list(operands)
+            for idx, oper in enumerate(operands):
+                if Instruction._is_number(oper):
+                    # allocate a literal slot at address = start + code_count + data_index
+                    lit_name = f"LIT{data_index}"
+                    lit_addr = start_addr + code_count + data_index
+                    # store the half-precision binary value into memory at lit_addr
+                    hp = HalfPrecision.hpdec2bin(float(oper))
+                    memory.store(lit_addr, hp)
+                    # register the literal name in the variable table so encoder
+                    # can resolve it to the address
+                    variable.store(lit_name, lit_addr)
+                    new_operands[idx] = lit_name
+                    data_slots.append((lit_name, lit_addr, hp))
+                    data_index += 1
+
+            new_code = op + (" " + ", ".join(new_operands) if new_operands else "")
             uop = op.upper()
 
-            if uop in ("CB", "CF") and operands:
-                # Store current instruction address to the block slot.
-                block_sym = operands[0].upper()
+            if uop in ("CB", "CF") and new_operands:
+                block_sym = new_operands[0].upper()
                 if block_sym in variable.data:
-                    memory.store(variable.data[block_sym], current_addr)
+                    memory.store(variable.load(block_sym), start_addr + len(encoded))
 
-                inst_code = Instruction.encode(code_part)
+                inst_code = Instruction.encode(new_code)
                 encoded.insert(block_count, inst_code)
                 block_count += 1
             else:
-                inst_code = Instruction.encode(code_part)
+                inst_code = Instruction.encode(new_code)
                 encoded.append(inst_code)
-
-            current_addr += 1
 
         # Store number of blocks in BR as required by the ISA design.
         register.store(variable.data["BR"], block_count)
 
-        # Write encoded program words to memory starting at the original BR address.
+        # Write encoded program words to memory starting at the BR address.
         for i, code in enumerate(encoded):
             memory.store(start_addr + i, code)
+
+        # Write literal data values after the code block (already stored above),
+        # nothing else to do because we used memory.store earlier.

@@ -1,0 +1,9 @@
+x Sample .stepanmonster program for the CMSC132 ISA simulator
+x It demonstrates comment parsing, basic operations, output, and clean stop.
+
+MOV R1, 6
+MOV R2, 4
+MUL R1, R2
+PRNT R1
+FUNC
+
