@@ -49,17 +49,12 @@ class Program:
     """Main ISA simulator engine — encodes, fetches, decodes, and executes instructions."""
 
     def __init__(self, program):
-        """Encode a list of assembly instruction strings into memory.
-
-        Delegates to Instruction.encodeProgram(), which parses each line,
-        converts to 32-bit binary, and stores sequentially in memory starting
-        at the Base Register address.
-        """
+        """Encode each instruction of the program."""
         Instruction.encodeProgram(program)
 
     @staticmethod
     def exception(name, value):
-        """Handle runtime exceptions during execution.
+        """Finds the exception based on its name and value.
 
         Currently supports 'DivByZero':
         - Both operands zero       -> 'Infinity'
@@ -73,36 +68,42 @@ class Program:
                 return 'undefined'
         return None
 
-    def _get_movecode(self, opcode):
-        """Determine the write-mode code from the 5-bit opcode.
+    def getOp(self, inscode):
+        """Gets the effective address and the type of storage (memory or register) of the operand.
 
-        movecode 1 = CALL (PC -> CR, then source -> destination)
-        movecode 2 = RET  (CR -> PC, then source -> destination)
-        movecode 3 = SCAN (input message -> destination)
-        movecode 0 = default (direct source -> destination)
+        Parameters:
+            inscode — the code of operand including addressing mode.
+
+        Process:
+            1. If the addressing mode is immediate, return its Half Precision decimal value.
+            2. If it is based, indexed, or relative, identify the displacement.
+            3. Otherwise, identify the storage (memory or register) address
+               (make sure to get the Half Precision decimal value).
+            4. Call the appropriate addressing mode with the appropriate parameter.
+
+        Returns: The addressing mode except for immediate.
         """
-        if opcode[0] == '0' and opcode[1] == '1':
-            if opcode[2:5] == '001':
-                return 1
-            if opcode[2:5] == '010':
-                return 2
-            if opcode[2:5] == '011':
-                return 3
-        return 0
+        ib = inscode[5]       # immediate bit
+        rb = inscode[16]      # relative/based bit
+        mode_bits = inscode[17:20]   # Op2Mode
+        addr_bits = inscode[20:27]   # Op2Addr
 
-    def getOp(self, mode_bits, addr_bits, op_num=1):
-        """Resolve an operand's effective address and value using its 3-bit mode code.
+        # 1. Immediate addressing mode
+        if ib == '1':
+            extra = inscode[27:32]
+            val = HalfPrecision.hpbin2dec(extra.zfill(Length.precision))
+            return (None, val, None)
 
-        Dispatches to the appropriate AddressingMode method based on the mode:
-        000 = Register      001 = Register Indirect      010 = Direct
-        011 = Indirect      100/101 = Indexed            110 = Auto-Increment
-        111 = Auto-Decrement
+        # 2. Based, indexed, or relative — identify displacement type
+        if rb == '1':
+            if mode_bits in ('000', '001', '010', '011'):
+                val = AddressingMode.based(addr_bits)
+            else:
+                val = AddressingMode.relative(addr_bits)
+            return (None, val, 'memory')
 
-        Returns a tuple (effective_address, value, storage_type) where
-        storage_type is 'register' or 'memory' (used by write()).
-        """
+        # 3. Otherwise — standard addressing modes
         addr_int = int(addr_bits, 2)
-
         if mode_bits == '000':
             eff, val, _ = AddressingMode.register(addr_int)
             return (eff, val, 'register')
@@ -128,12 +129,17 @@ class Program:
         return (None, None, None)
 
     def execute(self, result, opcode):
-        """Perform the operation dictated by the opcode on the resolved operand values.
+        """Perform Execute operations.
 
-        Write-bit = 1: Arithmetic (MOD/ADD/SUB/MUL/DIV) based on category code.
-                       Division/mod by zero triggers the DivByZero exception handler.
-        Execute-bit = 1, Write-bit = 0: Jump comparison against JR.
-                       Category determines which comparison (EQ/NE/LT/LE/GT/GE/JMP).
+        Process: Get the category from the opcode.
+        - If the Write Bit of the opcode is 1, perform the four basic operations
+          and modulo based on the category and return the result. For division,
+          create an exception for division by zero.
+        - Otherwise (Write Bit of the opcode is 0), perform jumps based on the
+          category. The purpose of jump with comparison is really to compare the
+          'JR' and zero.
+
+        Returns: The result if Write Bit of the opcode is 1.
         """
         exec_bit = opcode[0]
         write_bit = opcode[1]
@@ -172,14 +178,14 @@ class Program:
         return None
 
     def write(self, dest, src, movecode):
-        """Write a value to a destination storage location.
+        """Perform Write operations.
 
-        dest = (storage_type, address) tuple from getOp()
+        dest = (storage_type, address) tuple
         movecode determines special write behavior:
-        1 = CALL: save PC to CR, then store src
-        2 = RET:  restore PC from CR, then store src
-        3 = SCAN: pull next message from MSG buffer, store that instead of src
-        0 = default: direct store
+        1 = CALL: move PC -> CR, then src -> dest
+        2 = RET:  move CR -> PC, then src -> dest
+        3 = SCAN: replace src with message value, then src -> dest
+        any = default: always perform src -> dest
         """
         typ, addr = dest
         if movecode == 1:
@@ -200,62 +206,86 @@ class Program:
             Access.store(typ, addr, src)
 
     def run(self):
-        """Main fetch-decode-execute loop.
+        """Execute each Instruction Codes starting from the address pointed by 'IR'.
 
-        Each cycle:
-        1. FETCH   — Load IR (Instruction Register) to get the current address,
-                     then load the 32-bit instruction string from memory.
-        2. DECODE  — Split the 32-bit string into opcode, operand modes, addresses,
-                     and special flags (ib = immediate bit, rb = relative/based bit).
-                     Resolve operand 1 via getOp() and operand 2 via either
-                     immediate, relative/based, or standard addressing.
-        3. EXECUTE — If Execute bit is set, perform arithmetic (write=1) or
-                     jump comparison (write=0). For jumps, update PC to the
-                     target address if the condition is met.
-        4. WRITE   — If Write bit is set, store the result back to the destination.
-        5. PRINT   — If neither bit is set (PRNT/EOP), output the value.
-        6. ADVANCE — Increment PC and update IR (unless a jump was taken).
+        Process: Initialize a list of monadic and niladic operations. They are
+        for future use but for now, it's empty because all operations are
+        converted to instructions with two operands.
 
-        Terminates when the instruction is not a valid 32-bit string or is all
-        zeros (EOP/FUNC sentinel).
+        Loop:
+        1. Gets the value of 'IR'. Get the Instruction Code pointed by the 'IR'.
+           If the Instruction Code is not a 32-bit format or consists of all
+           zeros, break from the loop.
+        2. Get the opcode, the first operand, and the second operand (only if
+           the operation is not dyadic).
+        3. If the Execute Bit is 1, perform the execute with appropriate
+           parameters. If the Write Bit is 1, perform the write with appropriate
+           parameters.
+        4. If both the Execute and Write Bit are all zeros, perform the print.
+        5. Move the value of 'PC' to 'IR', then increment the value of 'PC' by 1.
         """
+        # Initialize a list of monadic and niladic operations.
+        # For future use; currently empty because all operations are converted
+        # to instructions with two operands.
+        monadic_ops = []
+        niladic_ops = []
+
         ir_addr = variable.data["IR"]
         pc_addr = variable.data["PC"]
 
         while True:
+            # 1. Fetch — get IR value, load instruction code from memory
             ir = register.load(ir_addr)
             inscode = memory.load(ir)
 
+            # If not 32-bit format or all zeros, break
             if not isinstance(inscode, str) or len(inscode) != Length.instrxn or inscode == "0" * Length.instrxn:
                 break
 
+            # 2. Decode — get opcode, first operand, second operand
             opcode = inscode[0:5]
             exec_bit = inscode[0]
             write_bit = inscode[1]
-            ib = inscode[5]
-            rb = inscode[16]
 
-            op1_eff, op1_val, op1_stor = self.getOp(inscode[6:9], inscode[9:16], 1)
+            # Resolve first operand (op1) — always standard addressing
+            op1_mode = inscode[6:9]
+            op1_addr = inscode[9:16]
+            op1_addr_int = int(op1_addr, 2)
 
-            op2_val = None
-            if ib == '1':
-                extra = inscode[27:32]
-                op2_val = HalfPrecision.hpbin2dec(extra.zfill(Length.precision))
-            elif rb == '1':
-                op2_addr_bits = inscode[20:27]
-                op2_mode = inscode[17:20]
-                if op2_mode in ('000', '001', '010', '011'):
-                    op2_val = AddressingMode.based(op2_addr_bits)
-                else:
-                    op2_val = AddressingMode.relative(op2_addr_bits)
+            if op1_mode == '000':
+                op1_eff, op1_val, _ = AddressingMode.register(op1_addr_int)
+                op1_stor = 'register'
+            elif op1_mode == '001':
+                op1_eff, op1_val = AddressingMode.register_indirect(op1_addr_int)
+                op1_stor = 'memory'
+            elif op1_mode == '010':
+                op1_eff, op1_val = AddressingMode.direct(op1_addr_int)
+                op1_stor = 'memory'
+            elif op1_mode == '011':
+                op1_eff, op1_val = AddressingMode.indirect(op1_addr_int)
+                op1_stor = 'memory'
+            elif op1_mode in ('100', '101'):
+                op1_eff, op1_val = AddressingMode.indexed(op1_addr)
+                op1_stor = 'memory'
+            elif op1_mode == '110':
+                op1_eff, op1_val = AddressingMode.autoinc(op1_addr_int)
+                op1_stor = 'memory'
+            elif op1_mode == '111':
+                op1_eff, op1_val = AddressingMode.autodec(op1_addr_int)
+                op1_stor = 'memory'
             else:
-                _, op2_val, _ = self.getOp(inscode[17:20], inscode[20:27], 2)
+                op1_eff, op1_val, op1_stor = None, None, None
+
+            # Resolve second operand (op2) via getOp (handles all modes)
+            _, op2_val, _ = self.getOp(inscode)
 
             jump_taken = False
 
+            # 3. If Execute Bit is 1, perform execute
             if exec_bit == '1':
                 result = self.execute((op1_val, op2_val), opcode)
                 if write_bit == '0':
+                    # Jump operation — update PC if condition is met
                     if result:
                         register.store(pc_addr, op1_val)
                         register.store(ir_addr, op1_val)
@@ -263,13 +293,28 @@ class Program:
             else:
                 result = op2_val
 
+            # If Write Bit is 1, perform write
             if write_bit == '1':
-                movecode = self._get_movecode(opcode)
+                # Determine movecode from opcode (CALL=1, RET=2, SCAN=3, default=0)
+                if exec_bit == '0':
+                    cat = opcode[2:5]
+                    if cat == '001':
+                        movecode = 1
+                    elif cat == '010':
+                        movecode = 2
+                    elif cat == '011':
+                        movecode = 3
+                    else:
+                        movecode = 0
+                else:
+                    movecode = 0
                 self.write((op1_stor, op1_eff), result, movecode)
 
+            # 4. If both Execute and Write Bit are all zeros, perform print
             if exec_bit == '0' and write_bit == '0':
                 print(result)
 
+            # 5. Move PC to IR, then increment PC by 1
             if not jump_taken:
                 pc = register.load(pc_addr)
                 register.store(ir_addr, pc)
@@ -283,15 +328,17 @@ if __name__ == "__main__":
     REQUIRED_EXT = ".stepanmonster"
 
     def run_from_file(filename):
+        # Create a variable for division by zero exception
+        divzero = Except("Division by zero")
+
+        # Access the file (must have extension matching group name)
         if os.path.splitext(filename)[1].lower() != REQUIRED_EXT:
             raise ValueError(f"Input file must use the '{REQUIRED_EXT}' extension.")
 
         with open(filename, 'r') as f:
             instructions = f.readlines()
 
-        # Required runtime exception variable for division-by-zero handling.
-        divzero = Except("Division by zero")
-
+        # Convert text from file as list of instructions and pass to Program class
         program = Program(instructions)
         program.run()
         return divzero
