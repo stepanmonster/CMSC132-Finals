@@ -29,6 +29,10 @@ operationCodes = [
     ["000", "001", "010", "011", "100", "101", "110", "111"],
 ]
 
+# ISA operand field width: 3-bit mode + 7-bit address = 10.
+# bin_convert's opMode=4 means Length.operand=11; the correct field width is 10.
+_OP_BITS = Length.opAddr + 3
+
 
 class Instruction:
     """Assembler-style instruction encoder."""
@@ -179,7 +183,7 @@ class Instruction:
         if "M:" in token:
             raw = token.split("M:", 1)[1]
             Instruction._queue_message(raw)
-            return "0" * Length.operand
+            return "0" * _OP_BITS
 
         # Parenthesized forms
         if token.startswith("(") and token.endswith(")"):
@@ -209,33 +213,33 @@ class Instruction:
                 else:
                     addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(rem))
 
-                return (mode + addr).zfill(Length.operand)
+                return (mode + addr).zfill(_OP_BITS)
 
             # Auto inc / dec, register-indirect, indirect
             if "+" in inner:
                 rem = inner.replace("+", "").strip()
                 addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(rem))
-                return ("110" + addr).zfill(Length.operand)
+                return ("110" + addr).zfill(_OP_BITS)
 
             if "-" in inner:
                 rem = inner.replace("-", "").strip()
                 addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(rem))
-                return ("111" + addr).zfill(Length.operand)
+                return ("111" + addr).zfill(_OP_BITS)
 
             if Instruction._is_register_symbol(inner):
                 addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(inner))
-                return ("001" + addr).zfill(Length.operand)
+                return ("001" + addr).zfill(_OP_BITS)
 
             addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(inner))
-            return ("011" + addr).zfill(Length.operand)
+            return ("011" + addr).zfill(_OP_BITS)
 
         # Non-parenthesized: register or direct memory
         if Instruction._is_register_symbol(token):
             addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(token))
-            return ("000" + addr).zfill(Length.operand)
+            return ("000" + addr).zfill(_OP_BITS)
 
         addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(token))
-        return ("010" + addr).zfill(Length.operand)
+        return ("010" + addr).zfill(_OP_BITS)
 
     @staticmethod
     def _normalize_operation(op, operands):
@@ -306,7 +310,7 @@ class Instruction:
                 # Fallback: immediate in op1 is not ISA-standard, force direct zero.
                 op1_code = "010" + "0" * Length.opAddr
         else:
-            op1_code = "0" * Length.operand
+            op1_code = "0" * _OP_BITS
 
         # Operand 2
         if len(operands) >= 2:
@@ -315,7 +319,7 @@ class Instruction:
 
             if len(op2_encoded) == Length.precision:
                 ib = "1"
-                op2_code = "0" * Length.operand
+                op2_code = "0" * _OP_BITS
                 extra = op2_encoded[-5:]
             else:
                 op2_code = op2_encoded
@@ -333,7 +337,7 @@ class Instruction:
                             # Relative is decoded when op2 mode is 100..111.
                             op2_code = "100" + op2_code[3:]
         else:
-            op2_code = "0" * Length.operand
+            op2_code = "0" * _OP_BITS
 
         full = opcode + ib + op1_code + rb + op2_code + extra
         return full.zfill(Length.instrxn)

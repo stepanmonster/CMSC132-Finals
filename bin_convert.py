@@ -7,7 +7,7 @@ class Length:
 	dec_place = 2
 	instrxn = 16+precision
 	opAddr = 7
-	opMode = 3
+	opMode = 4
 	operand = opAddr+opMode
 	@staticmethod
 	def trimDec(value,places=dec_place):
