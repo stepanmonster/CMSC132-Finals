@@ -9,6 +9,8 @@ Provides:
 - Instruction.encodeProgram: parse program lines and place encoded words in memory
 """
 
+from enum import auto
+
 from bin_convert import HalfPrecision, Length
 from storage import memory, register, variable
 
@@ -31,6 +33,9 @@ operationCodes = [
 
 # ISA operand field width: 3-bit mode + 7-bit address = 10.
 # bin_convert's opMode=4 means Length.operand=11; the correct field width is 10.
+# mode(3) + address(7) = 10 bits total, so we use Length.opAddr=7 and ignore the extra bit.
+#Address: Contains the memory location, register number, or a raw constant
+# Mode (Addressing Mode): A set of rules that defines how to interpret the address field to find the actual data
 _OP_BITS = Length.opAddr + 3
 
 
@@ -71,6 +76,7 @@ class Instruction:
     _REGISTER_NAMES = {"BR", "XR", "ACC", "IR", "PC", "JR", "CR"}
 
     @staticmethod
+    #checks if the text can be converted to a number (int or float)
     def _is_number(text):
         try:
             float(text)
@@ -79,6 +85,7 @@ class Instruction:
             return False
 
     @staticmethod
+    #checks if the symbol is a register
     def _is_register_symbol(sym):
         usym = sym.upper()
         if usym in Instruction._REGISTER_NAMES:
@@ -88,28 +95,32 @@ class Instruction:
         return False
 
     @staticmethod
+    # Converts assembly symbols or numeric text into integer values.
     def _resolve_symbol_or_int(token):
         t = token.strip()
         ut = t.upper()
         if ut in variable.data:
-            return int(variable.load(ut))
+            return int(variable.load(ut)) #load number if variable exists
         if Instruction._is_number(t):
             return int(float(t))
         raise ValueError(f"Unknown operand/address token: {token}")
 
     @staticmethod
+    # Convert an integer into a 7-bit binary address.
     def _to_addr7(value):
         iv = int(value)
         return bin(iv & 0x7F).replace("0b", "").zfill(Length.opAddr)
 
     @staticmethod
-    def _to_disp7(value):
+    # checks if the value is negative, encodes the sign bit and magnitude for a 7-bit signed immediate.
+    def _to_disp7(value):   
         iv = int(value)
         sign = "1" if iv < 0 else "0"
         mag = abs(iv) & 0x3F
         return sign + bin(mag).replace("0b", "").zfill(Length.opAddr - 1)
 
     @staticmethod
+    # Splits an assembly instruction into its operation and operand parts, handling various operand formats and separators.
     def _split_inst(inst):
         text = inst.strip()
         if not text:
@@ -131,6 +142,7 @@ class Instruction:
         return op, operands
 
     @staticmethod
+    # Separates inline message text from code.
     def _extract_msg(line):
         idx = line.find("M:")
         if idx == -1:
@@ -141,6 +153,7 @@ class Instruction:
 
     @staticmethod
     def _queue_message(msg):
+        # Stores decoded messages into a message queue.
         decoded = Instruction.decodeMSG(msg)
         q = variable.data.get("MSG", {})
         next_index = len(q)
@@ -148,6 +161,7 @@ class Instruction:
         variable.data["MSG"] = q
 
     @staticmethod
+    # Converts a special encoded message format into readable text.
     def decodeMSG(msg):
         """Decode message placeholders into printable control characters.
 
@@ -167,6 +181,7 @@ class Instruction:
         return out
 
     @staticmethod
+    # Encodes ONE operand into binary form.
     def encodeOp(operand):
         """Encode one operand.
 
@@ -177,16 +192,19 @@ class Instruction:
 
         # Immediate value
         if Instruction._is_number(token):
+            #encode as floating-point binary (16-bit)
             return HalfPrecision.hpdec2bin(float(token))
 
         # Message token (optional feature)
         if "M:" in token:
             raw = token.split("M:", 1)[1]
             Instruction._queue_message(raw)
+            # Message is NOT stored in instruction bits., It is handled separately by runtime.
             return "0" * _OP_BITS
 
         # Parenthesized forms
         if token.startswith("(") and token.endswith(")"):
+            # get the exact value
             inner = token[1:-1].strip()
             uinner = inner.upper()
 
@@ -240,8 +258,18 @@ class Instruction:
 
         addr = Instruction._to_addr7(Instruction._resolve_symbol_or_int(token))
         return ("010" + addr).zfill(_OP_BITS)
+    
+       #Mode	Meaning
+            #000	register
+            #001	register indirect
+            #010	direct memory
+            #011	indirect
+            #100	indexed/relative
+            #110	auto increment
+            #111	auto decrement
 
     @staticmethod
+    # Converts pseudo-instructions into real instructions
     def _normalize_operation(op, operands):
         """Apply operation simplifications and implicit operands."""
         out_op = op.upper()
@@ -279,6 +307,7 @@ class Instruction:
         return out_op, out_operands
 
     @staticmethod
+    # Converts ONE full assembly line → 32-bit binary instruction
     def encode(inst):
         """Encode one instruction string to a 32-bit instruction code."""
         text = inst.strip()
@@ -349,6 +378,8 @@ class Instruction:
         CB/CF instructions are encoded and inserted at the start of the output
         sequence to simplify block jumps, while preserving the rest in order.
         """
+        """The program is loaded into memory starting at address stored in BR register
+        BR = Base Register (start of program block)"""
         start_addr = register.load(variable.data["BR"])
 
         # First pass: count actual instructions (skip comments) to determine
